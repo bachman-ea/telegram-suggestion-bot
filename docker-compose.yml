@@ -1,0 +1,11 @@
+services:
+  bot:
+    build: .
+    container_name: telegram_suggestion_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./bot.db:/app/bot.db
+    environment:
+      - TZ=Europe/Moscow
