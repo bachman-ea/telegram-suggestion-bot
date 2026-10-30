@@ -15,7 +15,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import Config
 from database import Database
-from utils import append_author_tag, format_author_tag, update_user_status
+from utils import (
+    append_author_tag,
+    format_author_mention,
+    format_channel_author_tag,
+    update_user_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +57,12 @@ async def publish_post(bot: Bot, post_id: int, db: Database, config: Config) -> 
     if post["status"] == "published":
         return True
 
-    author_tag = format_author_tag(
+    author_mention = format_author_mention(
+        user_name=post["user_name"],
+        user_username=post["user_username"],
+        user_id=post["user_id"],
+    )
+    author_tag = format_channel_author_tag(
         user_name=post["user_name"],
         user_username=post["user_username"],
         user_id=post["user_id"],
@@ -206,7 +216,7 @@ async def publish_post(bot: Bot, post_id: int, db: Database, config: Config) -> 
             mod_name = post.get("moderator_name") or "Администратор"
             new_text = (
                 f"🚀 <b>Пост #{post_id} опубликован в канале!</b>\n\n"
-                f"👤 <b>Автор:</b> {author_tag}\n"
+                f"👤 <b>Автор:</b> {author_mention}\n"
                 f"👮‍♂️ <b>Модератор:</b> {mod_name}\n"
                 f"🕒 <b>Опубликован:</b> {pub_time_str} МСК"
             )

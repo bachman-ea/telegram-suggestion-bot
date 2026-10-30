@@ -5,12 +5,21 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 
-def format_author_tag(user_name: str, user_username: Optional[str], user_id: int) -> str:
+def format_author_mention(user_name: str, user_username: Optional[str], user_id: int) -> str:
     if user_username:
         clean_user = user_username.lstrip("@")
-        return f"От: @{clean_user}"
+        return f"@{clean_user}"
     safe_name = html.escape(user_name or "Пользователь")
-    return f'От: <a href="tg://user?id={user_id}">{safe_name}</a>'
+    return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
+
+
+def format_channel_author_tag(user_name: str, user_username: Optional[str], user_id: int) -> str:
+    mention = format_author_mention(user_name, user_username, user_id)
+    return f"От: {mention}"
+
+
+def format_author_tag(user_name: str, user_username: Optional[str], user_id: int) -> str:
+    return format_author_mention(user_name, user_username, user_id)
 
 
 def append_author_tag(content_text: Optional[str], author_tag: str) -> str:
