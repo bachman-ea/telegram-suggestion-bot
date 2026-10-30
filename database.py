@@ -50,6 +50,11 @@ class Database:
             except sqlite3.OperationalError:
                 pass
 
+            try:
+                self.conn.execute("ALTER TABLE posts ADD COLUMN is_edited INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS banned_users (
                     user_id INTEGER PRIMARY KEY,
@@ -129,6 +134,28 @@ class Database:
                     SET user_status_message_id = ?
                     WHERE id = ?
                 """, (user_status_message_id, post_id))
+                self.conn.commit()
+
+        await asyncio.to_thread(_query)
+
+    async def update_post_content(
+        self,
+        post_id: int,
+        post_type: str,
+        text: str | None,
+        media_data: str | None,
+        is_edited: int = 1,
+    ) -> None:
+        def _query() -> None:
+            with self.lock:
+                self.conn.execute("""
+                    UPDATE posts 
+                    SET post_type = ?,
+                        text = ?,
+                        media_data = ?,
+                        is_edited = ?
+                    WHERE id = ?
+                """, (post_type, text, media_data, is_edited, post_id))
                 self.conn.commit()
 
         await asyncio.to_thread(_query)

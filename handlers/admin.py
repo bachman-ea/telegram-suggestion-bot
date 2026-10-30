@@ -1,4 +1,5 @@
 import html
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -16,7 +17,9 @@ from filters import AdminChatFilter
 from keyboards import (
     get_cancel_ban_keyboard,
     get_cancel_custom_keyboard,
+    get_cancel_edit_text_keyboard,
     get_cancel_revision_keyboard,
+    get_edit_post_keyboard,
     get_reschedule_keyboard,
     get_review_keyboard,
     get_schedule_keyboard,
@@ -39,6 +42,7 @@ class AdminStates(StatesGroup):
     waiting_for_custom_time = State()
     waiting_for_ban_reason = State()
     waiting_for_revision_comment = State()
+    waiting_for_edit_text = State()
 
 
 def get_moderator_mention(user) -> str:
@@ -57,9 +61,14 @@ async def apply_post_schedule(
     moderator_user,
 ) -> str:
     post_id = post["id"]
+    fresh = await db.get_post(post_id)
+    if fresh:
+        post = fresh
+
     mod_name = get_moderator_mention(moderator_user)
     target_str = format_msk_datetime(target_time, config.timezone)
     is_resched = post.get("status") == "scheduled"
+    is_edited = bool(post.get("is_edited"))
 
     await db.set_status(
         post_id=post_id,
@@ -72,11 +81,19 @@ async def apply_post_schedule(
     if scheduler:
         schedule_post_job(scheduler, bot, post_id, db, config, target_time)
 
-    status_text = (
-        f"⏳ <b>Время публикации вашего поста изменено на {target_str} МСК!</b>"
-        if is_resched
-        else f"⏳ <b>Ваш пост принят администрацией и будет опубликован в {target_str} МСК!</b>"
-    )
+    if is_resched:
+        status_text = (
+            f"⏳ <b>Время публикации вашего поста (с изменениями) изменено на {target_str} МСК!</b>"
+            if is_edited
+            else f"⏳ <b>Время публикации вашего поста изменено на {target_str} МСК!</b>"
+        )
+    else:
+        status_text = (
+            f"⏳ <b>Ваш пост принят с изменениями и будет опубликован в {target_str} МСК!</b>"
+            if is_edited
+            else f"⏳ <b>Ваш пост принят администрацией и будет опубликован в {target_str} МСК!</b>"
+        )
+
     await update_user_status(
         bot=bot,
         user_id=post["user_id"],
@@ -99,13 +116,17 @@ async def build_scheduled_list_view(db: Database, config: Config) -> tuple[str, 
     for p in scheduled_posts:
         sched_time_str = format_msk_datetime(p["scheduled_at"], config.timezone)
         author = format_author_tag(p["user_name"], p["user_username"], p["user_id"])
+        edit_badge = " ✏️" if p.get("is_edited") else ""
         preview = (p["text"] or "").strip().replace("\n", " ")
         if len(preview) > 40:
             preview = preview[:40] + "..."
         snippet = f' — <i>«{html.escape(preview)}»</i>' if preview else ""
-        lines.append(f"• <b>Пост #{p['id']}</b> на <b>{sched_time_str} МСК</b>\n  Автор: {author}{snippet}")
+        lines.append(f"• <b>Пост #{p['id']}</b>{edit_badge} на <b>{sched_time_str} МСК</b>\n  Автор: {author}{snippet}")
         buttons.append([
-            InlineKeyboardButton(text=f"✏️ Время #{p['id']}", callback_data=f"resched:{p['id']}"),
+            InlineKeyboardButton(text=f"✏️ Изменить #{p['id']}", callback_data=f"edit:open:{p['id']}:queue"),
+            InlineKeyboardButton(text=f"⏰ Время #{p['id']}", callback_data=f"resched:{p['id']}"),
+        ])
+        buttons.append([
             InlineKeyboardButton(text=f"❌ Отменить #{p['id']}", callback_data=f"cancel_sch:{p['id']}"),
         ])
 
@@ -498,6 +519,320 @@ async def back_to_review_handler(
         parse_mode="HTML",
     )
     await callback.answer("Возврат к рассмотрению.")
+
+
+def render_edit_card_text(post: dict[str, Any]) -> str:
+    post_id = post["id"]
+    author = format_author_tag(post["user_name"], post["user_username"], post["user_id"])
+    edited_mark = " ✏️ <i>[Отредактирован]</i>" if post.get("is_edited") else ""
+
+    media_info = "Отсутствует (только текст)"
+    if post["post_type"] == "media_group":
+        try:
+            cnt = len(json.loads(post.get("media_data") or "[]"))
+            media_info = f"Альбом ({cnt} файлов)"
+        except Exception:
+            media_info = "Альбом"
+    elif post["post_type"] != "text":
+        media_info = post["post_type"].capitalize()
+
+    raw_text = post.get("text")
+    if raw_text and raw_text.strip():
+        text_preview = html.escape(raw_text.strip())
+        if len(text_preview) > 300:
+            text_preview = text_preview[:300] + "..."
+    else:
+        text_preview = "<i>(текст отсутствует)</i>"
+
+    return (
+        f"✏️ <b>Редактирование поста #{post_id}</b>{edited_mark}\n\n"
+        f"👤 <b>Автор:</b> {author}\n"
+        f"📎 <b>Медиа:</b> {media_info}\n\n"
+        f"📝 <b>Текущий текст:</b>\n{text_preview}\n\n"
+        f"<i>Используйте кнопки ниже для внесения изменений:</i>"
+    )
+
+
+@admin_router.callback_query(F.data.startswith("edit:open:"))
+async def edit_open_handler(
+    callback: CallbackQuery,
+    db: Database,
+) -> None:
+    parts = callback.data.split(":")
+    post_id = int(parts[2])
+    origin = parts[3]
+    post = await db.get_post(post_id)
+    if not post:
+        await callback.answer("❌ Заявка не найдена.", show_alert=True)
+        return
+
+    if post["status"] == "published":
+        await callback.answer("⚠️ Нельзя редактировать уже опубликованный пост!", show_alert=True)
+        return
+
+    card_text = render_edit_card_text(post)
+    kb = get_edit_post_keyboard(post, origin)
+    await callback.message.edit_text(card_text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("edit:text:"))
+async def edit_text_prompt_handler(
+    callback: CallbackQuery,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    parts = callback.data.split(":")
+    post_id = int(parts[2])
+    origin = parts[3]
+    post = await db.get_post(post_id)
+    if not post:
+        await callback.answer("❌ Заявка не найдена.", show_alert=True)
+        return
+
+    await state.set_state(AdminStates.waiting_for_edit_text)
+    await state.update_data(
+        post_id=post_id,
+        origin=origin,
+        admin_message_id=callback.message.message_id,
+    )
+    prompt_msg = await callback.message.reply(
+        f"📝 <b>Отправьте новый текст / подпись для поста #{post_id}:</b>\n\n"
+        f"<i>Или нажмите кнопку отмены:</i>",
+        reply_markup=get_cancel_edit_text_keyboard(post_id, origin),
+        parse_mode="HTML",
+    )
+    await state.update_data(prompt_message_id=prompt_msg.message_id)
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("edit:cancel_text:"))
+async def cancel_edit_text_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer("Ввод текста отменён.")
+
+
+@admin_router.message(AdminStates.waiting_for_edit_text, F.text)
+async def process_edit_text_input(
+    message: Message,
+    bot: Bot,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+    post_id = data.get("post_id")
+    origin = data.get("origin", "rev")
+    admin_msg_id = data.get("admin_message_id")
+    prompt_msg_id = data.get("prompt_message_id")
+
+    if not post_id:
+        await state.clear()
+        return
+
+    new_text = message.html_text
+    await state.clear()
+
+    if prompt_msg_id:
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=prompt_msg_id)
+        except Exception:
+            pass
+
+    post = await db.get_post(post_id)
+    if not post:
+        await message.reply(f"❌ Пост #{post_id} не найден.")
+        return
+
+    await db.update_post_content(
+        post_id=post_id,
+        post_type=post["post_type"],
+        text=new_text,
+        media_data=post["media_data"],
+        is_edited=1,
+    )
+
+    updated_post = await db.get_post(post_id)
+    if admin_msg_id and updated_post:
+        try:
+            card_text = render_edit_card_text(updated_post)
+            kb = get_edit_post_keyboard(updated_post, origin)
+            await bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=admin_msg_id,
+                text=card_text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"Could not refresh edit card: {e}")
+
+    await message.reply(f"✅ Текст поста #{post_id} успешно обновлён.")
+
+
+@admin_router.callback_query(F.data.startswith("edit:rm_text:"))
+async def edit_remove_text_handler(
+    callback: CallbackQuery,
+    db: Database,
+) -> None:
+    parts = callback.data.split(":")
+    post_id = int(parts[2])
+    origin = parts[3]
+    post = await db.get_post(post_id)
+    if not post:
+        await callback.answer("❌ Заявка не найдена.", show_alert=True)
+        return
+
+    if post["post_type"] == "text":
+        await callback.answer("⚠️ Нельзя удалить текст у текстового поста!", show_alert=True)
+        return
+
+    await db.update_post_content(
+        post_id=post_id,
+        post_type=post["post_type"],
+        text="",
+        media_data=post["media_data"],
+        is_edited=1,
+    )
+    updated_post = await db.get_post(post_id)
+    if updated_post:
+        card_text = render_edit_card_text(updated_post)
+        kb = get_edit_post_keyboard(updated_post, origin)
+        await callback.message.edit_text(card_text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer("Текст удалён.")
+
+
+@admin_router.callback_query(F.data.startswith("edit:rm_media:"))
+async def edit_remove_all_media_handler(
+    callback: CallbackQuery,
+    db: Database,
+) -> None:
+    parts = callback.data.split(":")
+    post_id = int(parts[2])
+    origin = parts[3]
+    post = await db.get_post(post_id)
+    if not post:
+        await callback.answer("❌ Заявка не найдена.", show_alert=True)
+        return
+
+    if not post.get("text") or not post.get("text").strip():
+        await callback.answer("⚠️ Нельзя удалить все медиа, пока нет текста! Сначала добавьте текст.", show_alert=True)
+        return
+
+    await db.update_post_content(
+        post_id=post_id,
+        post_type="text",
+        text=post["text"],
+        media_data=None,
+        is_edited=1,
+    )
+    updated_post = await db.get_post(post_id)
+    if updated_post:
+        card_text = render_edit_card_text(updated_post)
+        kb = get_edit_post_keyboard(updated_post, origin)
+        await callback.message.edit_text(card_text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer("Медиа удалено. Пост стал текстовым.")
+
+
+@admin_router.callback_query(F.data.startswith("edit:rm_item:"))
+async def edit_remove_album_item_handler(
+    callback: CallbackQuery,
+    db: Database,
+) -> None:
+    parts = callback.data.split(":")
+    post_id = int(parts[2])
+    idx = int(parts[3])
+    origin = parts[4]
+    post = await db.get_post(post_id)
+    if not post:
+        await callback.answer("❌ Заявка не найдена.", show_alert=True)
+        return
+
+    items = []
+    try:
+        items = json.loads(post.get("media_data") or "[]")
+    except Exception:
+        pass
+
+    if idx < 0 or idx >= len(items):
+        await callback.answer("Файл уже удалён или не найден.", show_alert=True)
+        return
+
+    items.pop(idx)
+    new_type = post["post_type"]
+    new_media_data = post["media_data"]
+
+    if len(items) == 0:
+        if not post.get("text") or not post.get("text").strip():
+            await callback.answer("⚠️ Нельзя удалить последний файл, если нет текста!", show_alert=True)
+            return
+        new_type = "text"
+        new_media_data = None
+    elif len(items) == 1:
+        new_type = items[0]["type"]
+        new_media_data = json.dumps(items[0])
+    else:
+        new_type = "media_group"
+        new_media_data = json.dumps(items)
+
+    await db.update_post_content(
+        post_id=post_id,
+        post_type=new_type,
+        text=post["text"],
+        media_data=new_media_data,
+        is_edited=1,
+    )
+    updated_post = await db.get_post(post_id)
+    if updated_post:
+        card_text = render_edit_card_text(updated_post)
+        kb = get_edit_post_keyboard(updated_post, origin)
+        await callback.message.edit_text(card_text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer(f"Файл #{idx + 1} удалён из альбома.")
+
+
+@admin_router.callback_query(F.data.startswith("edit:done:"))
+async def edit_done_handler(
+    callback: CallbackQuery,
+    db: Database,
+    config: Config,
+) -> None:
+    parts = callback.data.split(":")
+    post_id = int(parts[2])
+    origin = parts[3]
+    post = await db.get_post(post_id)
+    if not post:
+        await callback.answer("❌ Заявка не найдена.", show_alert=True)
+        return
+
+    if origin == "queue":
+        text, kb = await build_scheduled_list_view(db, config)
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await callback.answer("Редактирование завершено.")
+        return
+
+    edited_badge = " ✏️ <i>[Отредактирован]</i>" if post.get("is_edited") else ""
+    created_str = format_msk_datetime(post["created_at"], config.timezone)
+    author_tag = format_author_tag(post["user_name"], post["user_username"], post["user_id"])
+    card_text = (
+        f"📋 <b>Заявка на публикацию #{post_id}</b>{edited_badge}\n\n"
+        f"👤 <b>Автор:</b> {author_tag} (ID: <code>{post['user_id']}</code>)\n"
+        f"🕒 <b>Получено:</b> {created_str} МСК\n"
+    )
+    if post.get("is_edited") and post.get("text"):
+        snip = post["text"].strip().replace("\n", " ")
+        if len(snip) > 60:
+            snip = snip[:60] + "..."
+        card_text += f"\n📝 <b>Текущий текст:</b> <i>«{html.escape(snip)}»</i>\n"
+    card_text += "\n<i>Выберите действие ниже:</i>"
+
+    await callback.message.edit_text(card_text, reply_markup=get_review_keyboard(post_id), parse_mode="HTML")
+    await callback.answer("Редактирование завершено.")
 
 
 @admin_router.callback_query(F.data.startswith("sch:now:"))

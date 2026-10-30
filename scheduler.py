@@ -200,12 +200,17 @@ async def publish_post(bot: Bot, post_id: int, db: Database, config: Config) -> 
         published_at=now_msk.isoformat(),
     )
 
+    user_pub_text = (
+        "🎉 <b>Ваш пост был опубликован в канале (с изменениями администрации)!</b>"
+        if post.get("is_edited")
+        else "🎉 <b>Ваш пост был опубликован в канале!</b>"
+    )
     await update_user_status(
         bot=bot,
         user_id=post["user_id"],
         status_message_id=post.get("user_status_message_id"),
         reply_to_message_id=post["user_message_id"],
-        text="🎉 <b>Ваш пост был опубликован в канале!</b>",
+        text=user_pub_text,
     )
 
     admin_chat_id = post.get("admin_chat_id")
