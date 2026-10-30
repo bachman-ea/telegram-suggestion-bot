@@ -16,6 +16,7 @@ from filters import AdminChatFilter
 from keyboards import (
     get_cancel_ban_keyboard,
     get_cancel_custom_keyboard,
+    get_cancel_revision_keyboard,
     get_reschedule_keyboard,
     get_review_keyboard,
     get_schedule_keyboard,
@@ -37,6 +38,7 @@ admin_router.callback_query.filter(AdminChatFilter())
 class AdminStates(StatesGroup):
     waiting_for_custom_time = State()
     waiting_for_ban_reason = State()
+    waiting_for_revision_comment = State()
 
 
 def get_moderator_mention(user) -> str:
@@ -157,6 +159,139 @@ async def reject_post_handler(
     )
     await callback.message.edit_text(new_card_text, reply_markup=None, parse_mode="HTML")
     await callback.answer("Пост отклонён. Автор уведомлен.")
+
+
+@admin_router.callback_query(F.data.startswith("rev:rev:"))
+async def revision_prompt_handler(
+    callback: CallbackQuery,
+    db: Database,
+    state: FSMContext,
+) -> None:
+    post_id = int(callback.data.split(":")[2])
+    post = await db.get_post(post_id)
+
+    if not post:
+        await callback.answer("❌ Заявка не найдена.", show_alert=True)
+        return
+
+    if post["status"] == "published":
+        await callback.answer("⚠️ Нельзя отправить на доработку опубликованный пост!", show_alert=True)
+        return
+
+    await state.set_state(AdminStates.waiting_for_revision_comment)
+    await state.update_data(
+        post_id=post_id,
+        author_id=post["user_id"],
+        admin_message_id=callback.message.message_id,
+    )
+
+    prompt_text = (
+        f"🔄 <b>Укажите замечания / что нужно доработать по посту #{post_id}:</b>\n\n"
+        f"<i>Отправьте сообщение с комментарием или нажмите кнопку отмены ниже:</i>"
+    )
+    prompt_msg = await callback.message.reply(
+        prompt_text,
+        reply_markup=get_cancel_revision_keyboard(post_id),
+        parse_mode="HTML",
+    )
+    await state.update_data(prompt_message_id=prompt_msg.message_id)
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("rev:cancel_rev:"))
+async def cancel_revision_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer("Отправка на доработку отменена.")
+
+
+@admin_router.message(AdminStates.waiting_for_revision_comment, F.text)
+async def process_revision_comment_input(
+    message: Message,
+    bot: Bot,
+    db: Database,
+    config: Config,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+    post_id = data.get("post_id")
+    admin_msg_id = data.get("admin_message_id")
+    prompt_msg_id = data.get("prompt_message_id")
+
+    if not post_id:
+        await state.clear()
+        return
+
+    comment = message.text.strip()
+    await state.clear()
+
+    if prompt_msg_id:
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=prompt_msg_id)
+        except Exception:
+            pass
+
+    post = await db.get_post(post_id)
+    if not post:
+        await message.reply(f"❌ Пост #{post_id} не найден.")
+        return
+
+    mod_name = get_moderator_mention(message.from_user)
+    now_msk = datetime.now(config.timezone)
+    now_str = format_msk_datetime(now_msk, config.timezone)
+
+    await db.set_status(
+        post_id=post_id,
+        status="needs_revision",
+        moderator_id=message.from_user.id,
+        moderator_name=mod_name,
+        revision_comment=comment,
+    )
+
+    user_text = (
+        f"🔄 <b>Ваш предложенный пост отправлен на доработку.</b>\n\n"
+        f"<b>Комментарий администрации:</b>\n"
+        f"{html.escape(comment)}\n\n"
+        f"<i>Вы можете исправить замечания и прислать пост заново в этот диалог.</i>"
+    )
+    await update_user_status(
+        bot=bot,
+        user_id=post["user_id"],
+        status_message_id=post.get("user_status_message_id"),
+        reply_to_message_id=post["user_message_id"],
+        text=user_text,
+    )
+
+    author_tag = format_author_tag(post["user_name"], post["user_username"], post["user_id"])
+    new_card_text = (
+        f"🔄 <b>Пост #{post_id} отправлен на доработку</b>\n\n"
+        f"👤 <b>Автор:</b> {author_tag}\n"
+        f"👮‍♂️ <b>Модератор:</b> {mod_name}\n"
+        f"📝 <b>Замечания:</b> {html.escape(comment)}\n"
+        f"🕒 <b>Время:</b> {now_str} МСК"
+    )
+    if admin_msg_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=admin_msg_id,
+                text=new_card_text,
+                reply_markup=None,
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to edit admin card: {e}")
+
+    await message.reply(
+        f"🔄 <b>Пост #{post_id} успешно отправлен автору на доработку!</b>",
+        parse_mode="HTML",
+    )
 
 
 @admin_router.callback_query(F.data.startswith("rev:ban:"))

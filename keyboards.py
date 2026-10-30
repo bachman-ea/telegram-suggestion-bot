@@ -9,7 +9,8 @@ def get_review_keyboard(post_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rev:rej:{post_id}"),
             ],
             [
-                InlineKeyboardButton(text="🚫 Отклонить и заблокировать", callback_data=f"rev:ban:{post_id}")
+                InlineKeyboardButton(text="🔄 На доработку", callback_data=f"rev:rev:{post_id}"),
+                InlineKeyboardButton(text="🚫 Отклонить и бан", callback_data=f"rev:ban:{post_id}"),
             ],
         ]
     )
@@ -70,6 +71,16 @@ def get_cancel_ban_keyboard(post_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="❌ Отменить блокировку", callback_data=f"rev:cancel_ban:{post_id}")
+            ]
+        ]
+    )
+
+
+def get_cancel_revision_keyboard(post_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="❌ Отменить отправку на доработку", callback_data=f"rev:cancel_rev:{post_id}")
             ]
         ]
     )

@@ -45,6 +45,11 @@ class Database:
             except sqlite3.OperationalError:
                 pass
 
+            try:
+                self.conn.execute("ALTER TABLE posts ADD COLUMN revision_comment TEXT")
+            except sqlite3.OperationalError:
+                pass
+
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS banned_users (
                     user_id INTEGER PRIMARY KEY,
@@ -148,6 +153,7 @@ class Database:
         moderator_name: str | None = None,
         scheduled_at: str | None = None,
         published_at: str | None = None,
+        revision_comment: str | None = None,
     ) -> None:
         def _query() -> None:
             with self.lock:
@@ -157,7 +163,8 @@ class Database:
                         moderator_id = COALESCE(?, moderator_id),
                         moderator_name = COALESCE(?, moderator_name),
                         scheduled_at = CASE WHEN ? IS NOT NULL THEN ? ELSE scheduled_at END,
-                        published_at = CASE WHEN ? IS NOT NULL THEN ? ELSE published_at END
+                        published_at = CASE WHEN ? IS NOT NULL THEN ? ELSE published_at END,
+                        revision_comment = CASE WHEN ? IS NOT NULL THEN ? ELSE revision_comment END
                     WHERE id = ?
                 """, (
                     status,
@@ -167,6 +174,8 @@ class Database:
                     scheduled_at,
                     published_at,
                     published_at,
+                    revision_comment,
+                    revision_comment,
                     post_id,
                 ))
                 self.conn.commit()
@@ -204,7 +213,7 @@ class Database:
                 rows = self.conn.execute("""
                     SELECT status, COUNT(*) as cnt FROM posts GROUP BY status
                 """).fetchall()
-                stats = {"pending": 0, "approved": 0, "scheduled": 0, "published": 0, "rejected": 0}
+                stats = {"pending": 0, "approved": 0, "scheduled": 0, "published": 0, "rejected": 0, "needs_revision": 0}
                 for r in rows:
                     if r["status"] in stats:
                         stats[r["status"]] = r["cnt"]
